@@ -1,0 +1,76 @@
+name: flutter-ci
+
+# Reusable CI for Flutter projects: format check, analyze, test, build.
+
+on:
+  workflow_call:
+    inputs:
+      flutter-version:
+        description: Flutter SDK version, e.g. "3.47.8" (pin it) or "3.x".
+        type: string
+        required: true
+      working-directory:
+        description: Directory that contains pubspec.yaml.
+        type: string
+        default: "."
+      format-check:
+        description: Fail if `dart format` would change files.
+        type: boolean
+        default: true
+      analyze:
+        type: boolean
+        default: true
+      test-command:
+        description: Test command. Empty skips the step.
+        type: string
+        default: flutter test
+      build-command:
+        description: Build command. Empty skips the step.
+        type: string
+        default: flutter build web --release
+      timeout-minutes:
+        type: number
+        default: 20
+
+permissions:
+  contents: read
+
+jobs:
+  ci:
+    name: analyze, test, build
+    runs-on: ubuntu-24.04
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: ${{ inputs.working-directory }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2.23.0
+        with:
+          channel: stable
+          flutter-version: ${{ inputs.flutter-version }}
+          cache: true
+
+      - name: Install dependencies
+        run: flutter pub get
+
+      - name: Check formatting
+        if: inputs.format-check
+        run: dart format --output=none --set-exit-if-changed .
+
+      - name: Analyze
+        if: inputs.analyze
+        run: flutter analyze
+
+      - name: Test
+        if: inputs.test-command != ''
+        run: ${{ inputs.test-command }}
+
+      - name: Build
+        if: inputs.build-command != ''
+        run: ${{ inputs.build-command }}

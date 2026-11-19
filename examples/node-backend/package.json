@@ -1,0 +1,15 @@
+{
+  "name": "sample-backend",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Stand-in for the NestJS backend: same scripts and dist/main.js output, no dependencies.",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "lint": "node --check src/main.js && node --check src/app.js",
+    "test": "node --test",
+    "build": "node scripts/build.js",
+    "start:prod": "node dist/main.js"
+  }
+}

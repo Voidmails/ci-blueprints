@@ -1,80 +1,139 @@
-# Lives on the server at /opt/app/docker-compose.yml (next to a .env file).
-# The deploy workflow writes <SERVICE>_TAG=<tag> into .env, so every service
-# keeps its own version. Adjust healthchecks and ports to match your images.
+# One file for every environment. Each environment is its own compose project:
+#
+#   docker compose -p voidmails-production --env-file production.env ...
+#   docker compose -p voidmails-staging    --env-file staging.env    ...
+#
+# The production env file enables the "edge" (Caddy) and "mail" profiles. Caddy is the only
+# container that publishes 80/443 and reaches the services of both environments through the shared
+# external network "voidmails-edge", using the aliases <ENV_NAME>-<service>.
+#
+# Image tags come from <SERVICE>_TAG in the env file and are written by deploy.sh.
+# Every service needs a healthcheck: deploy.sh waits for it before declaring a deploy successful.
+
+x-service: &service
+  restart: unless-stopped
+  security_opt:
+    - no-new-privileges:true
+  logging:
+    driver: json-file
+    options:
+      max-size: 10m
+      max-file: "3"
 
 services:
   caddy:
-    image: caddy:2
-    restart: unless-stopped
+    <<: *service
+    image: caddy:2-alpine
+    profiles: [edge]
     ports:
       - "80:80"
       - "443:443"
       - "443:443/udp"
+    environment:
+      BASE_DOMAIN: ${BASE_DOMAIN:?set BASE_DOMAIN in the env file}
+      ACME_EMAIL: ${ACME_EMAIL:?set ACME_EMAIL in the env file}
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy_data:/data
       - caddy_config:/config
-    networks: [web]
+    healthcheck:
+      test: ["CMD", "wget", "-qO", "/dev/null", "http://127.0.0.1:2019/config/"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    networks:
+      - edge
 
   frontend:
-    image: ghcr.io/your-org/frontend:${FRONTEND_TAG:-latest}
-    restart: unless-stopped
-    networks: [web]
+    <<: *service
+    image: ghcr.io/voidmails/frontend:${FRONTEND_TAG:-latest}
     healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://localhost:80/ >/dev/null || exit 1"]
-      interval: 10s
+      test: ["CMD", "wget", "-qO", "/dev/null", "http://127.0.0.1:8080/healthz"]
+      interval: 15s
       timeout: 5s
-      retries: 5
+      retries: 3
       start_period: 10s
+    networks:
+      edge:
+        aliases:
+          - ${ENV_NAME:?set ENV_NAME in the env file}-frontend
 
   landing:
-    image: ghcr.io/your-org/landing:${LANDING_TAG:-latest}
-    restart: unless-stopped
-    networks: [web]
+    <<: *service
+    image: ghcr.io/voidmails/landing:${LANDING_TAG:-latest}
     healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://localhost:80/ >/dev/null || exit 1"]
-      interval: 10s
+      test: ["CMD", "wget", "-qO", "/dev/null", "http://127.0.0.1:8080/healthz"]
+      interval: 15s
       timeout: 5s
-      retries: 5
+      retries: 3
       start_period: 10s
+    networks:
+      edge:
+        aliases:
+          - ${ENV_NAME}-landing
 
   backend:
-    image: ghcr.io/your-org/backend:${BACKEND_TAG:-latest}
-    restart: unless-stopped
-    env_file: [./backend.env]
-    networks: [web]
+    <<: *service
+    image: ghcr.io/voidmails/backend:${BACKEND_TAG:-latest}
+    environment:
+      NODE_ENV: production
+      PORT: "3000"
+    # Runtime secrets (DATABASE_URL, API keys, ...) stay on the server, never in git.
+    env_file:
+      - path: ./env/${ENV_NAME}/backend.env
+        required: false
     healthcheck:
-      # Adapt the port and path to your backend (and make sure wget/curl exists in the image)
-      test: ["CMD-SHELL", "wget -qO- http://localhost:8080/health >/dev/null || exit 1"]
-      interval: 10s
+      test: ["CMD", "wget", "-qO", "/dev/null", "http://127.0.0.1:3000/health"]
+      interval: 15s
       timeout: 5s
-      retries: 5
+      retries: 3
       start_period: 20s
+    networks:
+      edge:
+        aliases:
+          - ${ENV_NAME}-backend
 
+  # Image built by the mailserver repo (a thin layer on docker-mailserver). Production only:
+  # port 25 can only be bound once per IP. Mail data and config live in ./mail on the server.
   mailserver:
-    image: ghcr.io/your-org/mailserver:${MAILSERVER_TAG:-latest}
-    restart: unless-stopped
-    hostname: mail.example.com
+    <<: *service
+    image: ghcr.io/voidmails/mailserver:${MAILSERVER_TAG:-latest}
+    profiles: [mail]
+    hostname: mail.${BASE_DOMAIN}
     ports:
       - "25:25"
       - "465:465"
       - "587:587"
       - "993:993"
+    environment:
+      SSL_TYPE: manual
+      SSL_CERT_PATH: /caddy/caddy/certificates/acme-v02.api.letsencrypt.org-directory/mail.${BASE_DOMAIN}/mail.${BASE_DOMAIN}.crt
+      SSL_KEY_PATH: /caddy/caddy/certificates/acme-v02.api.letsencrypt.org-directory/mail.${BASE_DOMAIN}/mail.${BASE_DOMAIN}.key
+    env_file:
+      - path: ./env/${ENV_NAME}/mailserver.env
+        required: false
     volumes:
-      - mail_data:/var/mail
-    networks: [web]
+      - ./mail/data:/var/mail
+      - ./mail/state:/var/mail-state
+      - ./mail/logs:/var/log/mail
+      - ./mail/config:/tmp/docker-mailserver
+      - caddy_data:/caddy:ro
+      - /etc/localtime:/etc/localtime:ro
+    stop_grace_period: 1m
     healthcheck:
-      # Adapt to your mailserver image
-      test: ["CMD-SHELL", "nc -z localhost 25 || exit 1"]
+      test: ["CMD-SHELL", "ss --listening --tcp | grep -P 'LISTEN.+:smtp' || exit 1"]
       interval: 30s
       timeout: 5s
-      retries: 5
+      retries: 3
       start_period: 60s
+    networks:
+      - edge
 
 networks:
-  web:
+  edge:
+    name: voidmails-edge
+    external: true
 
 volumes:
   caddy_data:
   caddy_config:
-  mail_data:

@@ -1,0 +1,11 @@
+# Minimal stand-in for servers/docker-compose.yml, used by run-tests.sh.
+services:
+  sample:
+    image: localhost:5000/deploy-sample:${SAMPLE_TAG:-v1}
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "test", "-f", "/healthy"]
+      interval: 1s
+      timeout: 2s
+      retries: 3
+      start_period: 1s

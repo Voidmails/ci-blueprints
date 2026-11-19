@@ -1,52 +1,109 @@
-name: Test templates
+name: test-templates
 
-# CI for this repository: lint the workflows and run the reusable
-# workflows against the tiny sample projects in examples/.
+# Self-test for the blueprints: lint everything, then run each reusable workflow against the tiny
+# sample projects in examples/ and run servers/deploy.sh end to end against a local registry.
 
 on:
   pull_request:
   push:
     branches: [main]
+  workflow_dispatch:
 
 permissions:
   contents: read
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
-  actionlint:
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
+  lint:
+    name: lint (actionlint, yamllint, shellcheck, compose, caddy)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
     steps:
-      - uses: actions/checkout@v4
-      - name: Run actionlint
-        uses: docker://rhysd/actionlint:1.7.7
+      - uses: actions/checkout@v7
         with:
-          args: -color
+          persist-credentials: false
 
-  node-ci:
-    needs: actionlint
+      - name: actionlint
+        run: >-
+          docker run --rm -v "$PWD:/repo" -w /repo rhysd/actionlint:1.7.12 -color
+          .github/workflows/*.yml examples/consumers/*/ci.yml
+
+      - name: yamllint
+        run: yamllint --strict .
+
+      - name: shellcheck
+        run: shellcheck servers/deploy.sh examples/deploy-test/run-tests.sh
+
+      - name: docker compose config
+        working-directory: servers
+        run: |
+          for env in production staging; do
+            docker compose -p "voidmails-$env" --env-file "$env.env.example" config --quiet
+          done
+
+      - name: Caddyfile validate
+        run: >-
+          docker run --rm -e BASE_DOMAIN=example.com -e ACME_EMAIL=ops@example.com
+          -v "$PWD/servers/Caddyfile:/etc/caddy/Caddyfile:ro" caddy:2-alpine
+          caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
+
+  node-backend:
     uses: ./.github/workflows/node-ci.yml
+    permissions:
+      contents: read
     with:
-      working-directory: examples/node-app
+      working-directory: examples/node-backend
+      lint-command: npm run lint
 
-  docker-build:
-    needs: actionlint
+  static-web:
+    uses: ./.github/workflows/node-ci.yml
+    permissions:
+      contents: read
+    with:
+      working-directory: examples/static-web
+      lint-command: npm run lint
+
+  flutter-web:
+    uses: ./.github/workflows/flutter-ci.yml
+    permissions:
+      contents: read
+    with:
+      flutter-version: "3.47.8"
+      working-directory: examples/flutter-web
+
+  docker-publish:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: backend
+            context: examples/node-backend
+          - name: landing
+            context: examples/static-web
+          - name: frontend
+            context: examples/flutter-web
+    uses: ./.github/workflows/docker-publish.yml
     permissions:
       contents: read
       packages: write
-    uses: ./.github/workflows/docker-publish.yml
     with:
-      image-name: ${{ github.repository }}/example
-      context: examples/docker-app
-      dockerfile: examples/docker-app/Dockerfile
+      image-name: ci-blueprints-test-${{ matrix.name }}
+      context: ${{ matrix.context }}
       push: false
 
-  compose-config:
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
+  deploy-script:
+    name: deploy.sh end-to-end (rollback)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
     steps:
-      - uses: actions/checkout@v4
-      - name: Validate server compose file
-        working-directory: servers
-        run: |
-          cp backend.env.example backend.env
-          docker compose --env-file .env.example config --quiet
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - run: examples/deploy-test/run-tests.sh

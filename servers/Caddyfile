@@ -1,18 +1,63 @@
-# Replace the example domains. Caddy obtains and renews HTTPS certificates automatically.
-# Point the DNS A/AAAA records of each domain at the server before starting Caddy.
-
+# Edge proxy for all environments. {$BASE_DOMAIN} and {$ACME_EMAIL} come from production.env.
+# Upstreams are the network aliases <environment>-<service> defined in docker-compose.yml.
+# After editing: docker compose -p voidmails-production --env-file production.env restart caddy
 {
-	email you@example.com
+	email {$ACME_EMAIL}
 }
 
-example.com, www.example.com {
-	reverse_proxy landing:80
+(common) {
+	encode zstd gzip
+	header -Server
 }
 
-app.example.com {
-	reverse_proxy frontend:80
+(staging) {
+	import common
+	header X-Robots-Tag "noindex, nofollow"
+	# Optional: keep staging private. Generate a hash with: caddy hash-password
+	# basic_auth {
+	# 	team <bcrypt-hash>
+	# }
 }
 
-api.example.com {
-	reverse_proxy backend:8080
+# ---------- production ----------
+
+{$BASE_DOMAIN} {
+	import common
+	reverse_proxy production-landing:8080
+}
+
+www.{$BASE_DOMAIN} {
+	redir https://{$BASE_DOMAIN}{uri} permanent
+}
+
+app.{$BASE_DOMAIN} {
+	import common
+	reverse_proxy production-frontend:8080
+}
+
+api.{$BASE_DOMAIN} {
+	import common
+	reverse_proxy production-backend:3000
+}
+
+# Only here so Caddy obtains and renews the TLS certificate the mailserver reads from caddy_data.
+mail.{$BASE_DOMAIN} {
+	respond "mail.{$BASE_DOMAIN}" 200
+}
+
+# ---------- staging ----------
+
+staging.{$BASE_DOMAIN} {
+	import staging
+	reverse_proxy staging-landing:8080
+}
+
+app.staging.{$BASE_DOMAIN} {
+	import staging
+	reverse_proxy staging-frontend:8080
+}
+
+api.staging.{$BASE_DOMAIN} {
+	import staging
+	reverse_proxy staging-backend:3000
 }

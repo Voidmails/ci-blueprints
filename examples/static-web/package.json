@@ -1,0 +1,14 @@
+{
+  "name": "sample-landing",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Stand-in for the React/Vite landing page: same scripts and dist/ output, no dependencies.",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "lint": "node --check build.mjs",
+    "test": "node --test",
+    "build": "node build.mjs"
+  }
+}

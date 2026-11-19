@@ -5,9 +5,7 @@ updates:
     schedule:
       interval: weekly
     groups:
-      actions:
+      github-actions:
         patterns: ["*"]
-  - package-ecosystem: docker
-    directory: /examples/docker-app
-    schedule:
-      interval: weekly
+    commit-message:
+      prefix: ci

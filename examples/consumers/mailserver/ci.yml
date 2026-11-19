@@ -1,0 +1,48 @@
+# Copy to the Mailserver repo (Dockerfile FROM docker-mailserver) as .github/workflows/ci.yml.
+# Pull request: verify the image builds. Push to main: image -> production only
+# (port 25 can be bound once per IP, so there is no staging mailserver on the shared server).
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  ci:
+    if: github.event_name == 'pull_request'
+    uses: Voidmails/ci-blueprints/.github/workflows/docker-publish.yml@v1
+    permissions:
+      contents: read
+      packages: write
+    with:
+      image-name: mailserver
+      push: false
+
+  publish:
+    if: github.event_name == 'push'
+    uses: Voidmails/ci-blueprints/.github/workflows/docker-publish.yml@v1
+    permissions:
+      contents: read
+      packages: write
+    with:
+      image-name: mailserver
+
+  production:
+    needs: publish
+    uses: Voidmails/ci-blueprints/.github/workflows/deploy.yml@v1
+    with:
+      service: mailserver
+      environment: production
+      image-tag: ${{ needs.publish.outputs.image-tag }}
+    secrets:
+      DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+      DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+      DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+      DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}

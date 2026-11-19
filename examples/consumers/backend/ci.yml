@@ -1,0 +1,55 @@
+# Copy to the Backend repo (NestJS) as .github/workflows/ci.yml.
+# Pull request: lint, test, build. Push to main: image -> staging -> production.
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  ci:
+    if: github.event_name == 'pull_request'
+    uses: Voidmails/ci-blueprints/.github/workflows/node-ci.yml@v1
+    permissions:
+      contents: read
+    with:
+      node-version: "24"
+      lint-command: npm run lint
+
+  publish:
+    if: github.event_name == 'push'
+    uses: Voidmails/ci-blueprints/.github/workflows/docker-publish.yml@v1
+    permissions:
+      contents: read
+      packages: write
+    with:
+      image-name: backend
+
+  staging:
+    needs: publish
+    uses: Voidmails/ci-blueprints/.github/workflows/deploy.yml@v1
+    with:
+      service: backend
+      environment: staging
+      image-tag: ${{ needs.publish.outputs.image-tag }}
+    secrets: &deploy-secrets
+      DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+      DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+      DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+      DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+
+  production:
+    needs: [publish, staging]
+    uses: Voidmails/ci-blueprints/.github/workflows/deploy.yml@v1
+    with:
+      service: backend
+      environment: production
+      image-tag: ${{ needs.publish.outputs.image-tag }}
+    secrets: *deploy-secrets
