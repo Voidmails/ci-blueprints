@@ -27,6 +27,12 @@ on:
           (frontends), secrets.yaml is rejected.
         type: string
         default: env
+      config-dir:
+        description: >-
+          Folder that holds <environment>/values.yaml and secrets.yaml, relative to the repo root.
+          Use one per service in a monorepo, e.g. "backend/deploy" and "frontend/deploy".
+        type: string
+        default: deploy
       deploy-script:
         description: Absolute path of deploy.sh on the server.
         type: string
@@ -65,6 +71,7 @@ jobs:
       IMAGE_TAG: ${{ inputs.image-tag }}
       TARGET_ENV: ${{ inputs.environment }}
       CONFIG_FORMAT: ${{ inputs.config-format }}
+      CONFIG_DIR: ${{ inputs.config-dir }}
       DEPLOY_SCRIPT: ${{ inputs.deploy-script }}
     steps:
       - name: Validate inputs
@@ -74,19 +81,21 @@ jobs:
           [[ "$IMAGE_TAG" =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$ ]] || fail "invalid image-tag '$IMAGE_TAG'"
           [[ "$TARGET_ENV" =~ ^[a-z0-9][a-z0-9-]{0,30}$ ]] || fail "invalid environment '$TARGET_ENV'"
           [[ "$CONFIG_FORMAT" =~ ^(env|json)$ ]] || fail "invalid config-format '$CONFIG_FORMAT' (env or json)"
+          [[ "$CONFIG_DIR" =~ ^[A-Za-z0-9_-][A-Za-z0-9_.-]*(/[A-Za-z0-9_-][A-Za-z0-9_.-]*)*$ && "$CONFIG_DIR" != *..* ]] ||
+            fail "invalid config-dir '$CONFIG_DIR' (a relative folder such as backend/deploy)"
           [[ "$DEPLOY_SCRIPT" =~ ^/[A-Za-z0-9_./-]+$ ]] || fail "invalid deploy-script '$DEPLOY_SCRIPT'"
 
       # Same commit as the image, so config and code are deployed (and re-run) together.
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
-          sparse-checkout: deploy
+          sparse-checkout: ${{ inputs.config-dir }}
 
-      - name: Package deploy/${{ inputs.environment }}
+      - name: Package ${{ inputs.config-dir }}/${{ inputs.environment }}
         id: config
         run: |
           fail() { echo "::error::$1"; exit 1; }
-          dir="deploy/$TARGET_ENV"
+          dir="$CONFIG_DIR/$TARGET_ENV"
           if [[ ! -d "$dir" ]]; then
             echo "No $dir/ in this repo: the server keeps its current config for $SERVICE."
             echo "bundle=" >> "$GITHUB_OUTPUT"

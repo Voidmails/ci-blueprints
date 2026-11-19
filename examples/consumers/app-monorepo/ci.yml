@@ -1,0 +1,132 @@
+# Copy to a repo with two services as .github/workflows/ci.yml:
+#   backend/   NestJS  (backend/deploy/<env>/values.yaml + secrets.yaml)
+#   frontend/  Flutter (frontend/deploy/<env>/values.yaml, public)
+# Only the parts that changed are tested, built and deployed.
+# Pull request: CI. Push to dev: deploy to staging. Push to main: deploy to production (approval).
+# Branch rules: require the status check "ci-ok".
+name: ci
+
+on:
+  pull_request:
+    branches: [dev, main]
+  push:
+    branches: [dev, main]
+
+permissions: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  changes:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      backend: ${{ steps.diff.outputs.backend }}
+      frontend: ${{ steps.diff.outputs.frontend }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - id: diff
+        env:
+          BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          if [[ "$BASE" =~ ^0*$ ]] || ! git cat-file -e "$BASE^{commit}" 2>/dev/null; then
+            files=$'backend/\nfrontend/'
+          else
+            files="$(git diff --name-only "$BASE" HEAD)"
+          fi
+          for app in backend frontend; do
+            if grep -qE "^($app/|\.github/|\.sops\.yaml$)" <<<"$files"; then changed=true; else changed=false; fi
+            echo "$app=$changed" | tee -a "$GITHUB_OUTPUT"
+          done
+
+  backend-ci:
+    needs: changes
+    if: github.event_name == 'pull_request' && needs.changes.outputs.backend == 'true'
+    uses: Voidmails/ci-blueprints/.github/workflows/node-ci.yml@v1
+    permissions:
+      contents: read
+    with:
+      working-directory: backend
+      node-version: "24"
+      lint-command: npm run lint
+
+  frontend-ci:
+    needs: changes
+    if: github.event_name == 'pull_request' && needs.changes.outputs.frontend == 'true'
+    uses: Voidmails/ci-blueprints/.github/workflows/flutter-ci.yml@v1
+    permissions:
+      contents: read
+    with:
+      working-directory: frontend
+      flutter-version: "3.47.8" # keep in sync with FLUTTER_VERSION in frontend/Dockerfile
+
+  ci-ok:
+    if: always() && github.event_name == 'pull_request'
+    needs: [changes, backend-ci, frontend-ci]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 2
+    permissions: {}
+    steps:
+      - env:
+          RESULTS: ${{ join(needs.*.result, ' ') }}
+        run: |
+          echo "results: $RESULTS"
+          [[ " $RESULTS " != *" failure "* && " $RESULTS " != *" cancelled "* ]]
+
+  backend-publish:
+    needs: changes
+    if: github.event_name == 'push' && needs.changes.outputs.backend == 'true'
+    uses: Voidmails/ci-blueprints/.github/workflows/docker-publish.yml@v1
+    permissions:
+      contents: read
+      packages: write
+    with:
+      image-name: backend
+      context: backend
+
+  frontend-publish:
+    needs: changes
+    if: github.event_name == 'push' && needs.changes.outputs.frontend == 'true'
+    uses: Voidmails/ci-blueprints/.github/workflows/docker-publish.yml@v1
+    permissions:
+      contents: read
+      packages: write
+    with:
+      image-name: frontend
+      context: frontend
+
+  backend-deploy:
+    needs: backend-publish
+    uses: Voidmails/ci-blueprints/.github/workflows/deploy.yml@v1
+    permissions:
+      contents: read
+    with:
+      service: backend
+      environment: ${{ github.ref_name == 'main' && 'production' || 'staging' }}
+      config-dir: backend/deploy
+      image-tag: ${{ needs.backend-publish.outputs.image-tag }}
+    secrets: &deploy-secrets
+      DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+      DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+      DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+      DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+
+  frontend-deploy:
+    needs: frontend-publish
+    uses: Voidmails/ci-blueprints/.github/workflows/deploy.yml@v1
+    permissions:
+      contents: read
+    with:
+      service: frontend
+      environment: ${{ github.ref_name == 'main' && 'production' || 'staging' }}
+      config-dir: frontend/deploy
+      config-format: json # values.yaml -> public /config.json, no secrets
+      image-tag: ${{ needs.frontend-publish.outputs.image-tag }}
+    secrets: *deploy-secrets

@@ -14,6 +14,20 @@ backend/                              (same layout in frontend, landing, mailser
         └── secrets.yaml
 ```
 
+**Several services in one repo** (e.g. backend + frontend): each service has its own folder, and
+there is one `.sops.yaml` at the repo root:
+
+```
+app/
+├── .sops.yaml
+├── backend/deploy/{staging,production}/{values.yaml,secrets.yaml}
+└── frontend/deploy/{staging,production}/values.yaml       public, no secrets
+```
+
+The repo's `ci.yml` passes `config-dir: backend/deploy` or `frontend/deploy` to each deploy
+(`examples/consumers/app-monorepo/ci.yml`). In the commands below, use the full path, e.g.
+`sops backend/deploy/staging/secrets.yaml`.
+
 On every deploy, CI sends `deploy/<env>/` to the server **still encrypted**. The server decrypts
 it with its own age key and starts the container with those values. Because config and image come
 from the same commit, a rollback restores both together.
@@ -114,11 +128,12 @@ lines.
 
 What happens next:
 
-1. On the PR, CI fails if any `deploy/*/secrets.yaml` is not encrypted. This catches an
-   accidentally committed plaintext file before it is merged. If that happened, treat the values
-   as leaked and change them.
-2. After the merge, the pipeline deploys to staging, then to production after approval. Each
-   deploy sends that commit's `deploy/<env>/` to the server.
+1. On the PR, CI fails if any `deploy/*/secrets.yaml` (at any depth) is not encrypted. This
+   catches an accidentally committed plaintext file before it is merged. If that happened, treat
+   the values as leaked and change them.
+2. A merge into `dev` deploys `deploy/staging/` to staging. A merge into `main` deploys
+   `deploy/production/` to production, after a reviewer approves it. Each deploy sends that
+   commit's folder to the server.
 3. If the new config breaks the app (for example a secret is missing, so `/health` fails), the
    server rolls back to the previous image **and** the previous config, and the deploy turns red.
 
@@ -184,8 +199,8 @@ Done once by the person who sets this up (the first one with sops installed):
       ```
 
    4. Make sure the repo's `.github/workflows/ci.yml` matches the current
-      `examples/consumers/<service>/ci.yml`. Its deploy jobs need `contents: read`, and the
-      frontend needs `config-format: json`.
+      `examples/consumers/<service>/ci.yml` (`app-monorepo` for backend + frontend in one repo).
+      Its deploy jobs need `contents: read`, and the frontend needs `config-format: json`.
    5. Commit and open a PR.
 4. Add the other developers (section 5).
 
@@ -201,7 +216,7 @@ CORS_ORIGIN: https://app.example.com
 LOG_LEVEL: info
 ```
 
-`backend/deploy/production/secrets.yaml`, as you see it in `sops deploy/production/secrets.yaml`:
+`backend/deploy/production/secrets.yaml`, as you see it in `sops backend/deploy/production/secrets.yaml`:
 
 ```yaml
 DATABASE_URL: postgres://voidmails:Xk82!pQz@db.internal:5432/voidmails_prod

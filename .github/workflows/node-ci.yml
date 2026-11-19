@@ -53,8 +53,7 @@ jobs:
       - name: Check deploy secrets are encrypted
         working-directory: ${{ github.workspace }}
         run: |
-          shopt -s nullglob
-          for f in deploy/*/secrets.yaml; do
+          git ls-files -z ':(glob)**/deploy/*/secrets.yaml' | while IFS= read -r -d '' f; do
             grep -q '^sops:' "$f" || { echo "::error file=$f::$f is not encrypted with sops"; exit 1; }
           done
 

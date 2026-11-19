@@ -5,10 +5,14 @@ Reusable GitHub Actions pipelines for the Voidmails services. Each service repo 
 Hetzner server running Docker Compose behind Caddy.
 
 ```
-pull request ──► CI (lint/test/build)                     main is protected: CI must pass
-push to main ──► docker-publish ──► deploy staging ──► deploy production (waits for approval)
-                 ghcr.io/voidmails/<service>:<sha>        healthcheck or automatic rollback
+pull request ──► CI (lint/test/build) ──► ci-ok             dev and main require "ci-ok"
+push to dev  ──► docker-publish ──► deploy staging
+push to main ──► docker-publish ──► deploy production       waits for a reviewer's approval
+                 ghcr.io/voidmails/<service>:<sha>          healthcheck or automatic rollback
 ```
+
+A repo can hold one service or several (`examples/consumers/app-monorepo`: backend + frontend,
+each built and deployed only when its folder changed).
 
 ## Contents
 
@@ -20,7 +24,7 @@ push to main ──► docker-publish ──► deploy staging ──► deploy 
 | `.github/workflows/deploy.yml` | SSH deploy of one service to one environment |
 | `.github/workflows/test-templates.yml` | Self-test of this repo |
 | `servers/` | `docker-compose.yml`, `Caddyfile`, `deploy.sh`, env templates, [`SETUP.md`](servers/SETUP.md) |
-| `examples/consumers/*/ci.yml` | Ready-to-copy workflows for frontend, landing, backend, mailserver |
+| `examples/consumers/*/ci.yml` | Ready-to-copy workflows: `app-monorepo` (backend + frontend in one repo), `backend`, `frontend`, `landing`, `mailserver` |
 | `examples/node-backend`, `static-web`, `flutter-web` | Tiny sample projects; their `Dockerfile`s are the templates for the real repos |
 | `examples/deploy-test/` | End-to-end test of `deploy.sh`, including rollback and SOPS config |
 | `examples/sops/.sops.yaml` | Template for the service repos: who can decrypt `deploy/*/secrets.yaml` |
@@ -76,7 +80,8 @@ Outputs: `image`, `image-tag` (the SHA), `digest`.
 | `service` | **required** | compose service name |
 | `image-tag` | **required** | usually `needs.publish.outputs.image-tag` |
 | `environment` | **required** | `staging` / `production` (GitHub Environment *and* server env) |
-| `config-format` | `env` | how `deploy/<env>/` is applied: `env` = container environment (values + secrets), `json` = public `/config.json` (values only, for frontends) |
+| `config-format` | `env` | how `<config-dir>/<env>/` is applied: `env` = container environment (values + secrets), `json` = public `/config.json` (values only, for frontends) |
+| `config-dir` | `deploy` | folder with `<env>/values.yaml` and `secrets.yaml`; one per service in a monorepo, e.g. `backend/deploy` |
 | `deploy-script` | `/opt/voidmails/deploy.sh` | |
 
 The calling job needs `permissions: contents: read`, so the deploy can check out `deploy/<env>/`.
@@ -162,13 +167,13 @@ No new pipeline is needed. If a new stack (say Go) needs its own CI, that is one
 **Each service repo**
 
 - **Environments** (Settings → Environments):
-  - `staging`: deployment branches limited to `main`, with the four deploy secrets.
+  - `staging`: deployment branches limited to `dev`, with the four deploy secrets.
   - `production`: **required reviewers** and deployment branches limited to `main`, with the same
     four secrets. The `production` job waits for approval.
   - Mailserver repo: `production` only.
-- **Branch ruleset on `main`**: require a PR and the CI status check. It shows up as
-  `ci / lint, test, build` (Node), `ci / analyze, test, build` (Flutter) or
-  `ci / build mailserver`. The CI job runs only on pull requests.
+- **Branch rulesets on `dev` and `main`**: require a pull request and the status check **`ci-ok`**.
+  Every example ends with this one gate job, so the rule is the same in every repo, and parts
+  that were skipped (unchanged folder in a monorepo) don't block the merge.
 - Workflow permissions: *Read repository contents* (the consumer grants `packages: write` only to
   the publish job).
 - GHCR packages are created on the first push, private and linked to the repo. Give the server's
@@ -234,8 +239,9 @@ deploy is visible.
 
 **Manual: redeploy an older tag.** Pick the commit SHA you want back.
 
-- **From GitHub** (preferred): Actions → `ci` → open the run of that commit → *Re-run jobs* →
-  pick `staging` or `production`. A re-run reuses that run's `image-tag` and that commit's
+- **From GitHub** (preferred): Actions → `ci` → open the run of that commit (on `dev` for
+  staging, on `main` for production) → *Re-run jobs* → pick the deploy job (`deploy`, or
+  `backend-deploy` / `frontend-deploy` in the monorepo). A re-run reuses that run's `image-tag` and that commit's
   `deploy/<env>/` config, and production still asks for approval.
 - **On the server** (if GitHub is unavailable). This only switches the image; the config stays as
   it is:

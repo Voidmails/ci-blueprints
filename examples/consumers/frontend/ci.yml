@@ -1,11 +1,13 @@
-# Copy to the Frontend repo (Flutter web) as .github/workflows/ci.yml.
-# Pull request: format, analyze, test, build. Push to main: image -> staging -> production.
+# Copy to a Frontend repo (Flutter web, one service per repo) as .github/workflows/ci.yml.
+# Pull request: format, analyze, test, build. Push to dev: deploy to staging.
+# Push to main: deploy to production (waits for approval). Branch rules: require "ci-ok".
 name: ci
 
 on:
   pull_request:
+    branches: [dev, main]
   push:
-    branches: [main]
+    branches: [dev, main]
 
 permissions: {}
 
@@ -22,6 +24,19 @@ jobs:
     with:
       flutter-version: "3.47.8" # keep in sync with FLUTTER_VERSION in the Dockerfile
 
+  ci-ok:
+    if: always() && github.event_name == 'pull_request'
+    needs: [ci]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 2
+    permissions: {}
+    steps:
+      - env:
+          RESULTS: ${{ join(needs.*.result, ' ') }}
+        run: |
+          echo "results: $RESULTS"
+          [[ " $RESULTS " != *" failure "* && " $RESULTS " != *" cancelled "* ]]
+
   publish:
     if: github.event_name == 'push'
     uses: Voidmails/ci-blueprints/.github/workflows/docker-publish.yml@v1
@@ -31,30 +46,18 @@ jobs:
     with:
       image-name: frontend
 
-  staging:
+  deploy:
     needs: publish
     uses: Voidmails/ci-blueprints/.github/workflows/deploy.yml@v1
     permissions:
       contents: read
     with:
       service: frontend
-      environment: staging
-      config-format: json # deploy/staging/values.yaml -> public /config.json
+      environment: ${{ github.ref_name == 'main' && 'production' || 'staging' }}
+      config-format: json # deploy/<env>/values.yaml -> public /config.json
       image-tag: ${{ needs.publish.outputs.image-tag }}
-    secrets: &deploy-secrets
+    secrets:
       DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
       DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
       DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
       DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
-
-  production:
-    needs: [publish, staging]
-    uses: Voidmails/ci-blueprints/.github/workflows/deploy.yml@v1
-    permissions:
-      contents: read
-    with:
-      service: frontend
-      environment: production
-      config-format: json # deploy/production/values.yaml -> public /config.json
-      image-tag: ${{ needs.publish.outputs.image-tag }}
-    secrets: *deploy-secrets
