@@ -47,6 +47,15 @@ services:
   frontend:
     <<: *service
     image: ghcr.io/voidmails/frontend:${FRONTEND_TAG:-latest}
+    # Public runtime config served as /config.json, so one image works in every environment.
+    # Browsers can read it: never put secrets in it. A missing file fails the deploy loudly.
+    volumes:
+      - type: bind
+        source: ./config/${ENV_NAME:?set ENV_NAME in the env file}/frontend.json
+        target: /usr/share/nginx/html/config.json
+        read_only: true
+        bind:
+          create_host_path: false
     healthcheck:
       test: ["CMD", "wget", "-qO", "/dev/null", "http://127.0.0.1:8080/healthz"]
       interval: 15s

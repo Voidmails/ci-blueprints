@@ -177,6 +177,27 @@ On the server (never in GitHub): a GHCR **read-only** PAT used by `docker login`
 secrets in `/opt/voidmails/env/<env>/<service>.env`. [SETUP.md](servers/SETUP.md) shows how to
 create each of them.
 
+## Configuration and secrets
+
+Service repos contain **no deployment config and no secrets**, only code, a `Dockerfile` and
+`ci.yml`. Every image is built once and promoted unchanged from staging to production, so
+anything that differs per environment is added on the server at runtime:
+
+| Value | Example | Lives in | Secret? |
+|---|---|---|---|
+| Deploy access | `DEPLOY_SSH_KEY`, ... | GitHub → service repo → Environments → secrets | yes |
+| Backend secrets | `DATABASE_URL`, `JWT_SECRET` | server: `/opt/voidmails/env/<env>/backend.env` | yes |
+| Backend settings that differ per env | `CORS_ORIGIN`, `LOG_LEVEL` | server: `/opt/voidmails/env/<env>/backend.env` | no, but kept there |
+| Backend settings equal in every env | `NODE_ENV`, `PORT` | `servers/docker-compose.yml` → `environment:` | no |
+| Frontend settings | `apiBaseUrl`, `environment` | server: `/opt/voidmails/config/<env>/frontend.json`, served as `/config.json` | **never**, browsers read it |
+| Frontend local dev defaults | `apiBaseUrl: http://localhost:3000` | frontend repo: `web/config.json` (replaced on the server) | no |
+| Domain, certificate email | `BASE_DOMAIN`, `ACME_EMAIL` | server: `/opt/voidmails/<env>.env` | no |
+
+Never put secrets in `build-args`: they end up in the image, and anyone who can pull it can read
+them. The frontend reads its config at startup (`examples/flutter-web/lib/config.dart`). Editing
+the file on the server and restarting the container changes it without a rebuild.
+[SETUP.md](servers/SETUP.md#changing-secrets-and-settings) shows how to apply each kind of change.
+
 ## Rollback
 
 **Automatic.** If the new container does not become healthy within 180 s, `deploy.sh` restores the

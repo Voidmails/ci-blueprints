@@ -15,8 +15,13 @@ Placeholders used below: `HOST` (server IP or DNS name), `example.com` (your dom
 ├── deploy.sh                       from servers/ (chmod 750)
 ├── production.env                  from production.env.example (tags, domain; no secrets)
 ├── staging.env                     from staging.env.example
-├── env/production/backend.env      runtime secrets per service (chmod 600, never in git)
-├── env/staging/backend.env
+├── env/                            SECRET: chmod 700, files chmod 600, never in git
+│   ├── production/backend.env      backend secrets + per-env backend settings
+│   ├── production/mailserver.env
+│   └── staging/backend.env
+├── config/                         PUBLIC: served to browsers, never put secrets here
+│   ├── production/frontend.json    from frontend-config.example.json, served as /config.json
+│   └── staging/frontend.json
 ├── mail/                           mailserver data/config (production)
 └── deploy-history.log              written by deploy.sh
 ```
@@ -124,7 +129,7 @@ so update them on purpose (`sudo apt upgrade`), ideally right after a snapshot.
 From your laptop, in a checkout of `ci-blueprints`:
 
 ```bash
-scp servers/docker-compose.yml servers/Caddyfile servers/deploy.sh servers/*.env.example you@HOST:/tmp/
+scp servers/docker-compose.yml servers/Caddyfile servers/deploy.sh servers/*.env.example servers/frontend-config.example.json you@HOST:/tmp/
 ```
 
 On the server:
@@ -140,14 +145,33 @@ cp production.env.example production.env   # set BASE_DOMAIN and ACME_EMAIL
 cp staging.env.example staging.env
 install -d -m 700 env env/production env/staging
 # runtime secrets, e.g. env/production/backend.env with DATABASE_URL=..., chmod 600
+install -d -m 755 config config/production config/staging
+install -m 644 /tmp/frontend-config.example.json config/production/frontend.json
+install -m 644 /tmp/frontend-config.example.json config/staging/frontend.json
+# edit both: "environment" and "apiBaseUrl" (staging: https://api.staging.example.com)
 docker network create voidmails-edge
 ```
+
+The frontend needs its `config/<env>/frontend.json` before its first deploy. Without it, the
+deploy fails with `bind source path does not exist`.
 
 To update the config later, copy the changed files the same way. Then:
 
 - After a `Caddyfile` change: `docker compose -p voidmails-production --env-file production.env restart caddy`
 - After a change to a service's compose entry: it is applied on that service's next deploy. To apply
   it now, run `./deploy.sh <service> <current-tag> <env>`.
+
+### Changing secrets and settings
+
+| File | Holds | Apply the change with |
+|---|---|---|
+| `env/<env>/backend.env` | backend secrets and per-environment settings (`KEY=value` lines) | `./deploy.sh backend "$(sed -n 's/^BACKEND_TAG=//p' <env>.env)" <env>` |
+| `config/<env>/frontend.json` | public frontend settings (JSON, readable by every visitor) | `docker compose -p voidmails-<env> --env-file <env>.env restart frontend` |
+| `<env>.env` | `BASE_DOMAIN`, `ACME_EMAIL`, profiles; `*_TAG` lines are written by `deploy.sh` | the next deploy (or restart Caddy for domain changes) |
+
+The backend line redeploys the version that is already running: compose sees the changed
+environment and recreates only the backend, after its healthcheck passes. The frontend only needs
+a restart, because the file is mounted into the running image.
 
 ## 8. Registry login and deploy key
 
