@@ -1,0 +1,12 @@
+# Copy to the ROOT of every service repo (backend, frontend, landing, mailserver).
+# Everyone listed here can decrypt and edit deploy/<env>/secrets.yaml for every environment:
+# the server (it decrypts during deploys) and each developer.
+# After changing the list, re-encrypt from the repo root:
+#   sops updatekeys -y deploy/staging/secrets.yaml
+#   sops updatekeys -y deploy/production/secrets.yaml
+creation_rules:
+  - path_regex: deploy[/\\][^/\\]+[/\\]secrets\.yaml$
+    age: >-
+      age1replace-with-the-server-public-key,
+      age1replace-with-developer-1-public-key,
+      age1replace-with-developer-2-public-key

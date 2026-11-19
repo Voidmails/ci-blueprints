@@ -35,6 +35,8 @@ jobs:
   staging:
     needs: publish
     uses: Voidmails/ci-blueprints/.github/workflows/deploy.yml@v1
+    permissions:
+      contents: read
     with:
       service: landing
       environment: staging
@@ -48,6 +50,8 @@ jobs:
   production:
     needs: [publish, staging]
     uses: Voidmails/ci-blueprints/.github/workflows/deploy.yml@v1
+    permissions:
+      contents: read
     with:
       service: landing
       environment: production

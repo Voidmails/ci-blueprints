@@ -2,6 +2,8 @@ name: deploy
 
 # Reusable deploy: SSH (pinned host key) to the server and run servers/deploy.sh, which pulls and
 # restarts only <service>, waits for its healthcheck and rolls back to the previous tag on failure.
+# If the calling repo has deploy/<environment>/ (values.yaml, SOPS-encrypted secrets.yaml), that
+# folder is sent along still encrypted; the server decrypts it with its own age key.
 
 on:
   workflow_call:
@@ -18,6 +20,13 @@ on:
         description: GitHub Environment and server environment, e.g. "staging" or "production".
         type: string
         required: true
+      config-format:
+        description: >-
+          How deploy/<environment>/ is rendered on the server. "env": values.yaml + secrets.yaml
+          become the container's environment. "json": values.yaml becomes a public config.json
+          (frontends), secrets.yaml is rejected.
+        type: string
+        default: env
       deploy-script:
         description: Absolute path of deploy.sh on the server.
         type: string
@@ -45,7 +54,8 @@ jobs:
     name: ${{ inputs.service }} → ${{ inputs.environment }}
     runs-on: ubuntu-24.04
     timeout-minutes: 15
-    permissions: {}
+    permissions:
+      contents: read
     environment: ${{ inputs.environment }}
     concurrency:
       group: deploy-${{ inputs.environment }}-${{ inputs.service }}
@@ -54,6 +64,7 @@ jobs:
       SERVICE: ${{ inputs.service }}
       IMAGE_TAG: ${{ inputs.image-tag }}
       TARGET_ENV: ${{ inputs.environment }}
+      CONFIG_FORMAT: ${{ inputs.config-format }}
       DEPLOY_SCRIPT: ${{ inputs.deploy-script }}
     steps:
       - name: Validate inputs
@@ -62,7 +73,38 @@ jobs:
           [[ "$SERVICE" =~ ^[a-z0-9][a-z0-9-]{0,62}$ ]] || fail "invalid service '$SERVICE'"
           [[ "$IMAGE_TAG" =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$ ]] || fail "invalid image-tag '$IMAGE_TAG'"
           [[ "$TARGET_ENV" =~ ^[a-z0-9][a-z0-9-]{0,30}$ ]] || fail "invalid environment '$TARGET_ENV'"
+          [[ "$CONFIG_FORMAT" =~ ^(env|json)$ ]] || fail "invalid config-format '$CONFIG_FORMAT' (env or json)"
           [[ "$DEPLOY_SCRIPT" =~ ^/[A-Za-z0-9_./-]+$ ]] || fail "invalid deploy-script '$DEPLOY_SCRIPT'"
+
+      # Same commit as the image, so config and code are deployed (and re-run) together.
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          sparse-checkout: deploy
+
+      - name: Package deploy/${{ inputs.environment }}
+        id: config
+        run: |
+          fail() { echo "::error::$1"; exit 1; }
+          dir="deploy/$TARGET_ENV"
+          if [[ ! -d "$dir" ]]; then
+            echo "No $dir/ in this repo: the server keeps its current config for $SERVICE."
+            echo "bundle=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          extra="$(find "$dir" -mindepth 1 ! -name values.yaml ! -name secrets.yaml)"
+          [[ -z "$extra" ]] || fail "only values.yaml and secrets.yaml are allowed in $dir/, found: $extra"
+          files=()
+          if [[ -f "$dir/values.yaml" ]]; then files+=(values.yaml); fi
+          if [[ -f "$dir/secrets.yaml" ]]; then
+            [[ "$CONFIG_FORMAT" == env ]] || fail "$dir/secrets.yaml: config-format json is public, secrets are not allowed"
+            grep -q '^sops:' "$dir/secrets.yaml" || fail "$dir/secrets.yaml is not encrypted with sops"
+            files+=(secrets.yaml)
+          fi
+          (( ${#files[@]} > 0 )) || fail "$dir/ has neither values.yaml nor secrets.yaml"
+          tar -czf "$RUNNER_TEMP/config.tgz" -C "$dir" "${files[@]}"
+          echo "Sending ${files[*]} from $dir/ (secrets stay encrypted until the server)."
+          echo "bundle=$RUNNER_TEMP/config.tgz" >> "$GITHUB_OUTPUT"
 
       - name: Configure SSH
         env:
@@ -84,7 +126,14 @@ jobs:
         env:
           DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
           DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          BUNDLE: ${{ steps.config.outputs.bundle }}
         run: |
+          cmd=("$DEPLOY_SCRIPT" "$SERVICE" "$IMAGE_TAG" "$TARGET_ENV")
+          input=/dev/null
+          if [[ -n "$BUNDLE" ]]; then
+            cmd+=("--config=$CONFIG_FORMAT")
+            input="$BUNDLE"
+          fi
           ssh -i ~/.ssh/deploy_key \
             -o IdentitiesOnly=yes \
             -o BatchMode=yes \
@@ -93,7 +142,7 @@ jobs:
             -o ConnectTimeout=20 \
             -o ServerAliveInterval=15 \
             "${DEPLOY_USER}@${DEPLOY_HOST}" \
-            "$DEPLOY_SCRIPT" "$SERVICE" "$IMAGE_TAG" "$TARGET_ENV"
+            "${cmd[@]}" <"$input"
 
       - name: Summary
         if: always()

@@ -15,16 +15,22 @@ Placeholders used below: `HOST` (server IP or DNS name), `example.com` (your dom
 ├── deploy.sh                       from servers/ (chmod 750)
 ├── production.env                  from production.env.example (tags, domain; no secrets)
 ├── staging.env                     from staging.env.example
-├── env/                            SECRET: chmod 700, files chmod 600, never in git
-│   ├── production/backend.env      backend secrets + per-env backend settings
+├── env/                            SECRET (700/600), written by deploy.sh: decrypted, never edit by hand
+│   ├── production/backend.env      from the backend repo's deploy/production/ (values + secrets)
 │   ├── production/mailserver.env
 │   └── staging/backend.env
-├── config/                         PUBLIC: served to browsers, never put secrets here
-│   ├── production/frontend.json    from frontend-config.example.json, served as /config.json
+├── config/                         PUBLIC (755/644), written by deploy.sh, served to browsers
+│   ├── production/frontend.json    from the frontend repo's deploy/production/values.yaml
 │   └── staging/frontend.json
 ├── mail/                           mailserver data/config (production)
 └── deploy-history.log              written by deploy.sh
+
+/home/deploy/.config/sops/age/keys.txt   the server's age private key (600), decrypts secrets.yaml
 ```
+
+The values in `env/` and `config/` come from the service repos (`deploy/<env>/values.yaml` and
+the SOPS-encrypted `deploy/<env>/secrets.yaml`) and are rewritten on every deploy. Change them in
+the repo, never on the server. [docs/secrets.md](../docs/secrets.md) is the developer guide.
 
 Each environment is a separate compose project: `voidmails-production` and `voidmails-staging`.
 Caddy runs in the production project and proxies to both through the external network `voidmails-edge`.
@@ -129,7 +135,7 @@ so update them on purpose (`sudo apt upgrade`), ideally right after a snapshot.
 From your laptop, in a checkout of `ci-blueprints`:
 
 ```bash
-scp servers/docker-compose.yml servers/Caddyfile servers/deploy.sh servers/*.env.example servers/frontend-config.example.json you@HOST:/tmp/
+scp servers/docker-compose.yml servers/Caddyfile servers/deploy.sh servers/*.env.example you@HOST:/tmp/
 ```
 
 On the server:
@@ -143,35 +149,20 @@ sudo -iu deploy
 cd /opt/voidmails
 cp production.env.example production.env   # set BASE_DOMAIN and ACME_EMAIL
 cp staging.env.example staging.env
-install -d -m 700 env env/production env/staging
-# runtime secrets, e.g. env/production/backend.env with DATABASE_URL=..., chmod 600
-install -d -m 755 config config/production config/staging
-install -m 644 /tmp/frontend-config.example.json config/production/frontend.json
-install -m 644 /tmp/frontend-config.example.json config/staging/frontend.json
-# edit both: "environment" and "apiBaseUrl" (staging: https://api.staging.example.com)
 docker network create voidmails-edge
 ```
 
-The frontend needs its `config/<env>/frontend.json` before its first deploy. Without it, the
-deploy fails with `bind source path does not exist`.
+`deploy.sh` creates `env/` and `config/` on the first deploy that brings config.
 
-To update the config later, copy the changed files the same way. Then:
+To update the server files later, copy the changed files the same way. Then:
 
 - After a `Caddyfile` change: `docker compose -p voidmails-production --env-file production.env restart caddy`
 - After a change to a service's compose entry: it is applied on that service's next deploy. To apply
   it now, run `./deploy.sh <service> <current-tag> <env>`.
 
-### Changing secrets and settings
-
-| File | Holds | Apply the change with |
-|---|---|---|
-| `env/<env>/backend.env` | backend secrets and per-environment settings (`KEY=value` lines) | `./deploy.sh backend "$(sed -n 's/^BACKEND_TAG=//p' <env>.env)" <env>` |
-| `config/<env>/frontend.json` | public frontend settings (JSON, readable by every visitor) | `docker compose -p voidmails-<env> --env-file <env>.env restart frontend` |
-| `<env>.env` | `BASE_DOMAIN`, `ACME_EMAIL`, profiles; `*_TAG` lines are written by `deploy.sh` | the next deploy (or restart Caddy for domain changes) |
-
-The backend line redeploys the version that is already running: compose sees the changed
-environment and recreates only the backend, after its healthcheck passes. The frontend only needs
-a restart, because the file is mounted into the running image.
+The only values that are still set on the server are in `<env>.env`: `BASE_DOMAIN`, `ACME_EMAIL`
+and the profiles. The `*_TAG` lines are written by `deploy.sh`. Application settings and secrets
+come from the service repos (section 8b).
 
 ## 8. Registry login and deploy key
 
@@ -229,6 +220,44 @@ Until the backend image exists in GHCR, this fails with `could not pull`. That e
 the key, the forced command and the script work. `ssh -i voidmails_deploy deploy@HOST` without a
 command must not give you a shell.
 
+## 8b. SOPS: decrypting the app secrets
+
+Each service repo holds its config in `deploy/<env>/values.yaml` (plain) and
+`deploy/<env>/secrets.yaml` (encrypted with SOPS for every developer's age key **and** this
+server's key). CI sends that folder still encrypted. `deploy.sh` decrypts it here and writes
+`env/<env>/<service>.env` or `config/<env>/<service>.json`. GitHub never sees a decryption key or
+a plaintext secret.
+
+Install the tools (sops is not in Ubuntu's archive; verify the checksum):
+
+```bash
+sudo apt install -y age python3-yaml
+cd /tmp
+curl -fsSLO https://github.com/getsops/sops/releases/download/v3.13.3/sops_3.13.3_amd64.deb
+curl -fsSLO https://github.com/getsops/sops/releases/download/v3.13.3/sops-v3.13.3.checksums.txt
+grep ' sops_3.13.3_amd64.deb$' sops-v3.13.3.checksums.txt | sha256sum -c -
+sudo apt install -y ./sops_3.13.3_amd64.deb
+sops --version
+```
+
+Create the server's age key as `deploy`, the user that runs `deploy.sh`:
+
+```bash
+sudo -iu deploy
+install -d -m 700 ~/.config/sops/age
+age-keygen -o ~/.config/sops/age/keys.txt
+chmod 600 ~/.config/sops/age/keys.txt
+age-keygen -y ~/.config/sops/age/keys.txt     # prints the PUBLIC key: age1...
+```
+
+- Send the **public** key (`age1...`) to whoever bootstraps `.sops.yaml` in the service repos
+  ([docs/secrets.md](../docs/secrets.md#one-time-bootstrap)).
+- Store a copy of the **private** key (`keys.txt`) in your password manager. If it is lost,
+  nothing is lost for good: a developer adds a new server key and re-encrypts. Until then,
+  deploys with secrets fail.
+- If the server is ever compromised, generate a new key, replace it in `.sops.yaml`, re-encrypt
+  (`sops updatekeys`) **and rotate every secret**, because the old key could read them.
+
 ## 9. First start
 
 ```bash
@@ -246,9 +275,11 @@ service it deploys. DNS records (A/AAAA) for `example.com`, `www`, `app`, `api`,
 - **Hetzner Backups**: daily, 7 kept, about +20% of the server price. Turn them on.
 - **Snapshot** before risky changes (OS release upgrade, Docker major update, compose restructuring).
 - Neither one is off-site. Back up off-site (e.g. `restic` to a Hetzner Storage Box) and test a restore:
-  `/opt/voidmails/*.env`, `/opt/voidmails/env/`, `/opt/voidmails/mail/`, and the database once the
+  `/opt/voidmails/*.env`, `/opt/voidmails/mail/`, and the database once the
   backend has one. The `caddy_data` volume is worth keeping too (it avoids Let's Encrypt rate limits).
-- Images do not need backups: they are in GHCR.
+- Images do not need backups: they are in GHCR. App config and secrets do not need them either:
+  they are in the service repos and are rewritten on the next deploy. The server's age key is in
+  your password manager (section 8b).
 
 Disk hygiene (as `deploy`, `crontab -e`). Rollbacks re-pull from GHCR, so pruning old images is safe:
 

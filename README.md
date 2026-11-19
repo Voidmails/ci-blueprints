@@ -22,7 +22,9 @@ push to main ──► docker-publish ──► deploy staging ──► deploy 
 | `servers/` | `docker-compose.yml`, `Caddyfile`, `deploy.sh`, env templates, [`SETUP.md`](servers/SETUP.md) |
 | `examples/consumers/*/ci.yml` | Ready-to-copy workflows for frontend, landing, backend, mailserver |
 | `examples/node-backend`, `static-web`, `flutter-web` | Tiny sample projects; their `Dockerfile`s are the templates for the real repos |
-| `examples/deploy-test/` | End-to-end test of `deploy.sh`, including rollback |
+| `examples/deploy-test/` | End-to-end test of `deploy.sh`, including rollback and SOPS config |
+| `examples/sops/.sops.yaml` | Template for the service repos: who can decrypt `deploy/*/secrets.yaml` |
+| [`docs/secrets.md`](docs/secrets.md) | Developer guide: install sops/age, edit config and secrets, add/remove developers |
 
 ## Blueprints
 
@@ -74,7 +76,10 @@ Outputs: `image`, `image-tag` (the SHA), `digest`.
 | `service` | **required** | compose service name |
 | `image-tag` | **required** | usually `needs.publish.outputs.image-tag` |
 | `environment` | **required** | `staging` / `production` (GitHub Environment *and* server env) |
+| `config-format` | `env` | how `deploy/<env>/` is applied: `env` = container environment (values + secrets), `json` = public `/config.json` (values only, for frontends) |
 | `deploy-script` | `/opt/voidmails/deploy.sh` | |
+
+The calling job needs `permissions: contents: read`, so the deploy can check out `deploy/<env>/`.
 
 Secrets, declared explicitly (no `secrets: inherit`): `DEPLOY_SSH_KEY`, `DEPLOY_HOST`,
 `DEPLOY_USER`, `DEPLOY_KNOWN_HOSTS`. The deploy job sets `environment:`, so GitHub resolves them
@@ -83,14 +88,20 @@ from that Environment of the calling repo. The consumer passes them through by n
 What it does:
 
 1. Validates the inputs.
-2. Opens SSH with `StrictHostKeyChecking=yes` against the pinned `DEPLOY_KNOWN_HOSTS`
+2. Checks out the commit's `deploy/<env>/` folder, if the repo has one. It checks that
+   `secrets.yaml` is SOPS-encrypted and packs the folder, still encrypted.
+3. Opens SSH with `StrictHostKeyChecking=yes` against the pinned `DEPLOY_KNOWN_HOSTS`
    (no `ssh-keyscan`).
-3. Runs `deploy.sh <service> <tag> <env>` on the server, which:
-   1. sets `<SERVICE>_TAG=<tag>` in `<env>.env`
-   2. runs `docker compose pull <service>`
-   3. runs `docker compose up -d --no-deps --wait <service>`, so only that service is touched and
+4. Runs `deploy.sh <service> <tag> <env> [--config=env|json]` on the server, with the folder on
+   stdin. `deploy.sh` then:
+   1. decrypts `secrets.yaml` with the server's age key and writes
+      `env/<env>/<service>.env` (mode 600) or `config/<env>/<service>.json` (public)
+   2. sets `<SERVICE>_TAG=<tag>` in `<env>.env`
+   3. runs `docker compose pull <service>`
+   4. runs `docker compose up -d --no-deps --wait <service>`, so only that service is touched and
       the command waits for its healthcheck
-   4. if the service is unhealthy, restores the previous tag, restarts it and **fails the job**
+   5. if the service is unhealthy, restores the previous tag **and the previous config**, restarts
+      it and **fails the job**
 
 Concurrency is `deploy-<environment>-<service>`, without cancelling, so deploys never overlap. On
 the server, `flock` also serializes deploys of different services to the same environment.
@@ -103,7 +114,8 @@ Conventions: service name = image name = compose service. Its tag variable is `<
 1. **In the new repo**: add a `Dockerfile` with a health endpoint (start from one in
    `examples/`). Copy the closest `examples/consumers/*/ci.yml` to `.github/workflows/ci.yml` and
    change `image-name` and `service`. Create the `staging` and `production` Environments with the
-   four deploy secrets (see [Required secrets](#required-secrets)).
+   four deploy secrets (see [Required secrets](#required-secrets)). If the service needs runtime
+   config, add `.sops.yaml` and `deploy/<env>/` ([docs/secrets.md](docs/secrets.md#one-time-bootstrap)).
 2. **In this repo**: copy an existing service block in `servers/docker-compose.yml`. Change the
    image (`ghcr.io/voidmails/<service>:${<SERVICE>_TAG:-latest}`), the healthcheck, and the alias
    (`${ENV_NAME}-<service>`). If it is public, add a block to `servers/Caddyfile`. Open a PR;
@@ -173,42 +185,60 @@ No new pipeline is needed. If a new stack (say Go) needs its own CI, that is one
 | `DEPLOY_KNOWN_HOSTS` | same | `<DEPLOY_HOST> ssh-ed25519 AAAA...`, the server's pinned host key |
 | `GITHUB_TOKEN` | automatic | GHCR push from `docker-publish.yml` |
 
-On the server (never in GitHub): a GHCR **read-only** PAT used by `docker login`, and runtime
-secrets in `/opt/voidmails/env/<env>/<service>.env`. [SETUP.md](servers/SETUP.md) shows how to
-create each of them.
+On the server (never in GitHub): a GHCR **read-only** PAT used by `docker login`, and the
+server's age private key that decrypts the app secrets. [SETUP.md](servers/SETUP.md) shows how to
+create both.
 
 ## Configuration and secrets
 
-Service repos contain **no deployment config and no secrets**, only code, a `Dockerfile` and
-`ci.yml`. Every image is built once and promoted unchanged from staging to production, so
-anything that differs per environment is added on the server at runtime:
+Each service repo holds its runtime config in `deploy/<env>/`. Non-secret values go in
+`values.yaml`, secrets go in `secrets.yaml`, encrypted with
+[SOPS](https://github.com/getsops/sops) for the server's and every developer's age key. Images
+are built once and promoted unchanged from staging to production. The config is added at deploy
+time from the same commit, so code and config always roll out and roll back together.
+
+```
+backend/                                frontend/
+├── .sops.yaml                          ├── web/config.json          local dev defaults
+└── deploy/                             └── deploy/
+    ├── staging/                            ├── staging/values.yaml  → public /config.json
+    │   ├── values.yaml   plain                └── production/values.yaml
+    │   └── secrets.yaml  SOPS-encrypted
+    └── production/ (same)
+```
 
 | Value | Example | Lives in | Secret? |
 |---|---|---|---|
 | Deploy access | `DEPLOY_SSH_KEY`, ... | GitHub → service repo → Environments → secrets | yes |
-| Backend secrets | `DATABASE_URL`, `JWT_SECRET` | server: `/opt/voidmails/env/<env>/backend.env` | yes |
-| Backend settings that differ per env | `CORS_ORIGIN`, `LOG_LEVEL` | server: `/opt/voidmails/env/<env>/backend.env` | no, but kept there |
+| Backend secrets | `DATABASE_URL`, `JWT_SECRET` | backend repo: `deploy/<env>/secrets.yaml` (encrypted) | yes |
+| Backend settings that differ per env | `CORS_ORIGIN`, `LOG_LEVEL` | backend repo: `deploy/<env>/values.yaml` | no |
 | Backend settings equal in every env | `NODE_ENV`, `PORT` | `servers/docker-compose.yml` → `environment:` | no |
-| Frontend settings | `apiBaseUrl`, `environment` | server: `/opt/voidmails/config/<env>/frontend.json`, served as `/config.json` | **never**, browsers read it |
+| Frontend settings | `apiBaseUrl`, `environment` | frontend repo: `deploy/<env>/values.yaml`, served as `/config.json` | **never**, browsers read it |
 | Frontend local dev defaults | `apiBaseUrl: http://localhost:3000` | frontend repo: `web/config.json` (replaced on the server) | no |
 | Domain, certificate email | `BASE_DOMAIN`, `ACME_EMAIL` | server: `/opt/voidmails/<env>.env` | no |
+| Server's age key | decrypts `secrets.yaml` | server: `/home/deploy/.config/sops/age/keys.txt` | yes |
+
+On the server, `deploy.sh` writes the decrypted result to `/opt/voidmails/env/<env>/<service>.env`
+or `/opt/voidmails/config/<env>/<service>.json` on every deploy. Never edit those files by hand.
+A repo without `deploy/<env>/` leaves the server's current file alone.
 
 Never put secrets in `build-args`: they end up in the image, and anyone who can pull it can read
-them. The frontend reads its config at startup (`examples/flutter-web/lib/config.dart`). Editing
-the file on the server and restarting the container changes it without a rebuild.
-[SETUP.md](servers/SETUP.md#changing-secrets-and-settings) shows how to apply each kind of change.
+them. **[docs/secrets.md](docs/secrets.md)** is the developer guide: installing sops and age,
+creating a key, editing secrets, and adding or removing developers.
 
 ## Rollback
 
 **Automatic.** If the new container does not become healthy within 180 s, `deploy.sh` restores the
-previous tag and restarts it. The job then fails, so the bad deploy is visible.
+previous tag and the previous config, and restarts the service. The job then fails, so the bad
+deploy is visible.
 
 **Manual: redeploy an older tag.** Pick the commit SHA you want back.
 
-- **From GitHub**: Actions → `ci` → open the run of that commit → *Re-run jobs* → pick `staging`
-  or `production`. A re-run reuses that run's `image-tag` output, and production still asks for
-  approval.
-- **On the server** (if GitHub is unavailable):
+- **From GitHub** (preferred): Actions → `ci` → open the run of that commit → *Re-run jobs* →
+  pick `staging` or `production`. A re-run reuses that run's `image-tag` and that commit's
+  `deploy/<env>/` config, and production still asks for approval.
+- **On the server** (if GitHub is unavailable). This only switches the image; the config stays as
+  it is:
 
   ```bash
   ssh you@HOST
@@ -231,7 +261,10 @@ used after the first deploy, so a rollback never needs to touch it.
   `examples/flutter-web`.
 - **docker-publish** (`push: false`) for all three sample Dockerfiles.
 - **deploy.sh end-to-end** against a local registry: first deploy, upgrade, unhealthy image with
-  automatic rollback, missing tag, forced-command parsing, input validation.
+  automatic rollback, missing tag, forced-command parsing, input validation, and SOPS config: the
+  secrets reach the container exactly as written, a broken config rolls back together with the
+  image, and undecryptable, plaintext, duplicate or unexpected config is rejected. The JSON config
+  is public and refuses secrets.
   Run it locally with `examples/deploy-test/run-tests.sh`.
 
 `deploy.yml` itself is only linted, because its SSH hop needs a real server. The script it runs

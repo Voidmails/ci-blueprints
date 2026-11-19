@@ -48,6 +48,7 @@ services:
     <<: *service
     image: ghcr.io/voidmails/frontend:${FRONTEND_TAG:-latest}
     # Public runtime config served as /config.json, so one image works in every environment.
+    # deploy.sh writes it from the frontend repo's deploy/<env>/values.yaml (--config=json).
     # Browsers can read it: never put secrets in it. A missing file fails the deploy loudly.
     volumes:
       - type: bind
@@ -87,9 +88,11 @@ services:
     environment:
       NODE_ENV: production
       PORT: "3000"
-    # Runtime secrets (DATABASE_URL, API keys, ...) stay on the server, never in git.
+    # Written by deploy.sh from the backend repo's deploy/<env>/values.yaml + SOPS secrets.yaml.
+    # "raw": values are taken literally, so $, # and quotes in secrets are safe.
     env_file:
       - path: ./env/${ENV_NAME}/backend.env
+        format: raw
         required: false
     healthcheck:
       test: ["CMD", "wget", "-qO", "/dev/null", "http://127.0.0.1:3000/health"]
@@ -120,6 +123,7 @@ services:
       SSL_KEY_PATH: /caddy/caddy/certificates/acme-v02.api.letsencrypt.org-directory/mail.${BASE_DOMAIN}/mail.${BASE_DOMAIN}.key
     env_file:
       - path: ./env/${ENV_NAME}/mailserver.env
+        format: raw
         required: false
     volumes:
       - ./mail/data:/var/mail

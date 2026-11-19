@@ -3,8 +3,13 @@ services:
   sample:
     image: localhost:5000/deploy-sample:${SAMPLE_TAG:-v1}
     restart: unless-stopped
+    env_file:
+      - path: ./env/${ENV_NAME}/sample.env
+        format: raw
+        required: false
     healthcheck:
-      test: ["CMD", "test", "-f", "/healthy"]
+      # BROKEN=1 in the deployed config simulates a bad configuration.
+      test: ["CMD-SHELL", "test -f /healthy && test -z \"$$BROKEN\""]
       interval: 1s
       timeout: 2s
       retries: 3

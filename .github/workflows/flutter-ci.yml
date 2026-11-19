@@ -50,6 +50,14 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Check deploy secrets are encrypted
+        working-directory: ${{ github.workspace }}
+        run: |
+          shopt -s nullglob
+          for f in deploy/*/secrets.yaml; do
+            grep -q '^sops:' "$f" || { echo "::error file=$f::$f is not encrypted with sops"; exit 1; }
+          done
+
       - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2.23.0
         with:
           channel: stable

@@ -34,9 +34,12 @@ jobs:
   staging:
     needs: publish
     uses: Voidmails/ci-blueprints/.github/workflows/deploy.yml@v1
+    permissions:
+      contents: read
     with:
       service: frontend
       environment: staging
+      config-format: json # deploy/staging/values.yaml -> public /config.json
       image-tag: ${{ needs.publish.outputs.image-tag }}
     secrets: &deploy-secrets
       DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
@@ -47,8 +50,11 @@ jobs:
   production:
     needs: [publish, staging]
     uses: Voidmails/ci-blueprints/.github/workflows/deploy.yml@v1
+    permissions:
+      contents: read
     with:
       service: frontend
       environment: production
+      config-format: json # deploy/production/values.yaml -> public /config.json
       image-tag: ${{ needs.publish.outputs.image-tag }}
     secrets: *deploy-secrets

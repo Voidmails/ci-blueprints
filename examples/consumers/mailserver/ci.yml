@@ -37,6 +37,8 @@ jobs:
   production:
     needs: publish
     uses: Voidmails/ci-blueprints/.github/workflows/deploy.yml@v1
+    permissions:
+      contents: read
     with:
       service: mailserver
       environment: production
